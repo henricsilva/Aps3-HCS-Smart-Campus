@@ -1,0 +1,62 @@
+sequenceDiagram
+    autonumber
+    participant SA as ServicoDeAcesso
+    participant MQ as BarramentoEventos (RabbitMQ)
+    participant OE as OrquestradorEnergia
+    participant AMB as Ambiente (agregado)
+    participant GP as GestorPerfilEnergetico
+    participant TMP as TemporizadorTolerancia
+    participant ATU as GatewayAtuadores
+
+    %% ── Fase 1: mudança de ocupação → aplicação do Perfil Energético ──
+    SA-)MQ: publicar("ocupacao.alterada", OccupancyEventDTO)
+    Note over SA,MQ: Chamada assíncrona (AMQP) - ServicoDeAcesso não bloqueia
+    MQ-)OE: tratarEventoOcupacao(OccupancyEventDTO)
+
+    OE->>AMB: aplicarEvento(OccupancyEventDTO)
+    AMB-->>OE: TransicaoDTO
+
+    alt TransicaoDTO.aceita == true
+        OE->>GP: resolverPerfil(ambienteId)
+        GP-->>OE: PerfilEnergeticoDTO
+        OE->>GP: calcularPlano(PerfilEnergeticoDTO, TransicaoDTO)
+        GP-->>OE: PlanoEnergiaDTO
+
+        par Comandos imediatos (iluminação e bancadas)
+            loop para cada comando em PlanoEnergiaDTO.comandosImediatos
+                OE->>ATU: executarComando(ComandoEnergiaDTO)
+                ATU-->>OE: ResultadoComandoDTO
+            end
+        and Comandos diferidos (climatização com tolerância)
+            loop para cada comando em PlanoEnergiaDTO.comandosDiferidos
+                OE->>TMP: agendar(ComandoEnergiaDTO)
+                TMP-)MQ: publicar("energia.atraso.900s", ComandoEnergiaDTO)
+                TMP-->>OE: TimerDTO
+            end
+        and Cancelamento de tolerância pendente (reocupação)
+            loop para cada toleranciaId em PlanoEnergiaDTO.timersACancelar
+                OE->>TMP: cancelar(toleranciaId)
+                TMP-->>OE: ConfirmacaoDTO
+            end
+        end
+
+        opt algum ResultadoComandoDTO.sucesso == false
+            OE-)MQ: publicar("energia.comando.falhou", FalhaComandoDTO)
+        end
+    else TransicaoDTO.aceita == false
+        Note over OE,AMB: Estado protegido: evento incompatível com o estado atual não altera o Ambiente nem aciona atuadores
+        OE-)MQ: publicar("energia.transicao.rejeitada", AlertaTransicaoDTO)
+    end
+
+    %% ── Fase 2: expiração da janela de tolerância (15 min) ──
+    Note over MQ,OE: Após 900 s na fila de atraso, a mensagem é redirecionada pela DLX
+    MQ-)OE: tratarToleranciaExpirada(TemporizadorExpiradoDTO)
+    OE->>AMB: expirarTolerancia(TemporizadorExpiradoDTO)
+    AMB-->>OE: TransicaoDTO
+
+    alt TransicaoDTO.aceita == true
+        OE->>ATU: executarComando(ComandoEnergiaDTO)
+        ATU-->>OE: ResultadoComandoDTO
+    else TransicaoDTO.aceita == false
+        Note over OE,AMB: Ambiente reocupado ou toleranciaId obsoleto: expiração descartada
+    end

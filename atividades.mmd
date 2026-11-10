@@ -1,0 +1,97 @@
+flowchart TB
+    classDef init fill:#000,stroke:#000,color:#000
+    classDef fim fill:#fff,stroke:#000,stroke-width:4px,color:#fff
+    classDef bar fill:#000,stroke:#000,color:#fff
+    classDef dec fill:#fff8e1,stroke:#8d6e00,color:#000
+    classDef acao fill:#e8f1fb,stroke:#2b5c97,color:#000
+
+    subgraph R1["Raia 1 - Serviço de Acesso / Sensor de Presença (sistema externo ao fluxo)"]
+        direction TB
+        I1(( )):::init
+        A1["Publicar OccupancyEventDTO<br/>BarramentoEventos.publicar()"]:::acao
+    end
+
+    subgraph R2["Raia 2 - Back-End: OrquestradorEnergia / Ambiente / GestorPerfilEnergetico"]
+        direction TB
+        B1["Receber evento<br/>OrquestradorEnergia.tratarEventoOcupacao()"]:::acao
+        B2["Validar e aplicar transição<br/>Ambiente.aplicarEvento()"]:::acao
+        D1{"Transição aceita?"}:::dec
+        B3["Publicar alerta de transição rejeitada<br/>energia.transicao.rejeitada"]:::acao
+        B4["Resolver Perfil Energético<br/>GestorPerfilEnergetico.resolverPerfil()"]:::acao
+        B5["Calcular plano de comandos<br/>GestorPerfilEnergetico.calcularPlano()"]:::acao
+        FK(["FORK"]):::bar
+        B6["Despachar comandos imediatos<br/>(iluminação e bancadas)"]:::acao
+        B7["Despachar comandos diferidos<br/>(climatização, atraso 900 s)"]:::acao
+        B8["Solicitar cancelamento de tolerância<br/>(reocupação)"]:::acao
+        JN(["JOIN"]):::bar
+        D2{"Todos os comandos<br/>com sucesso?"}:::dec
+        B9["Registrar plano aplicado"]:::acao
+        B10["Publicar falha<br/>energia.comando.falhou"]:::acao
+        F1((( ))):::fim
+        F2((( ))):::fim
+        F3((( ))):::fim
+    end
+
+    subgraph R3["Raia 3 - Serviço de Temporização: TemporizadorTolerancia + fila de atraso RabbitMQ"]
+        direction TB
+        T1["Enfileirar na fila de atraso<br/>TemporizadorTolerancia.agendar()"]:::acao
+        T2["Invalidar tolerância pendente<br/>TemporizadorTolerancia.cancelar()"]:::acao
+        I2(( )):::init
+        T3["Evento de tempo: 900 s decorridos<br/>(TTL expirado, redirecionado pela DLX)"]:::acao
+    end
+
+    subgraph R4["Raia 4 - Hardware IoT: GatewayAtuadores / Atuadores"]
+        direction TB
+        H1["Comutar iluminação<br/>GatewayAtuadores.executarComando()"]:::acao
+        H2["Comutar bancadas<br/>GatewayAtuadores.executarComando()"]:::acao
+        H3["Desligar climatização<br/>GatewayAtuadores.executarComando()"]:::acao
+    end
+
+    %% ── Fluxo A: mudança de ocupação ──
+    I1 --> A1
+    A1 -. "assíncrono (AMQP)" .-> B1
+    B1 --> B2
+    B2 --> D1
+    D1 -->|"[TransicaoDTO.aceita == false]"| B3
+    B3 --> F1
+    D1 -->|"[TransicaoDTO.aceita == true]"| B4
+    B4 --> B5
+    B5 --> FK
+    FK --> B6
+    FK --> B7
+    FK --> B8
+    B6 --> H1
+    B6 --> H2
+    B7 --> T1
+    B8 --> T2
+    H1 --> JN
+    H2 --> JN
+    T1 --> JN
+    T2 --> JN
+    JN --> D2
+    D2 -->|"[todosSucesso == true]"| B9
+    D2 -->|"[todosSucesso == false]"| B10
+    B9 --> F2
+    B10 --> F3
+
+    %% ── Fluxo B: expiração da tolerância ──
+    T1 -. "agenda timer" .-> I2
+    I2 --> T3
+    T3 -. "assíncrono (AMQP)" .-> C1
+
+    subgraph R2B["Raia 2 (continuação) - Back-End: tratamento da expiração"]
+        direction TB
+        C1["Receber expiração<br/>OrquestradorEnergia.tratarToleranciaExpirada()"]:::acao
+        C2["Validar toleranciaId e ocupação<br/>Ambiente.expirarTolerancia()"]:::acao
+        D3{"Transição aceita?"}:::dec
+        C3["Descartar expiração<br/>(ambiente reocupado ou id obsoleto)"]:::acao
+        F4((( ))):::fim
+        F5((( ))):::fim
+    end
+
+    C1 --> C2
+    C2 --> D3
+    D3 -->|"[TransicaoDTO.aceita == false]"| C3
+    C3 --> F4
+    D3 -->|"[TransicaoDTO.aceita == true]"| H3
+    H3 --> F5

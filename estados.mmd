@@ -1,0 +1,49 @@
+stateDiagram-v2
+    direction TB
+
+    [*] --> Vazio : AmbienteCadastrado / inicializarAmbiente()
+
+    state Vazio {
+        direction TB
+        [*] --> origemDaVacancia
+        state origemDaVacancia <<choice>>
+        origemDaVacancia --> ToleranciaClimatizacao : [origem == OCUPADO]
+        origemDaVacancia --> ModoEconomico : [origem != OCUPADO]
+
+        ModoEconomico : Modo Econômico
+        ModoEconomico : entry / garantirDispositivosDesligados()
+
+        ToleranciaClimatizacao : Tolerância do ar-condicionado
+        ToleranciaClimatizacao : entry / gerarToleranciaId()
+        ToleranciaClimatizacao : do / aguardar(toleranciaSegundos = 900)
+        ToleranciaClimatizacao : exit / invalidarToleranciaId()
+
+        ToleranciaClimatizacao --> ModoEconomico : TemporizadorExpirado [toleranciaId == vigente && presentes == 0] / desligarClimatizacao()
+    }
+
+    state PreCondicionado
+    PreCondicionado : Pré-condicionado por agendamento
+    PreCondicionado : entry / acionarClimatizacao()
+    PreCondicionado : do / aguardarPrimeiroUsuario()
+
+    state Ocupado
+    Ocupado : Modo Operacional (Sessão de Uso ativa)
+    Ocupado : entry / iniciarSessaoSeNecessario()
+    Ocupado : do / monitorarConsumo()
+    Ocupado : exit / desligarIluminacao()
+
+    Vazio --> Ocupado : OccupancyEvent_OCUPADO [acessoValidado && presentes != 0] / iniciarSessao(), ligarIluminacao(), ligarClimatizacao()
+    PreCondicionado --> Ocupado : OccupancyEvent_OCUPADO [acessoValidado && presentes != 0] / iniciarSessao(), ligarIluminacao()
+    Ocupado --> Ocupado : OccupancyEvent_OCUPADO [sessaoAtiva && acessoValidado] / registrarPresenca()
+    Ocupado --> Ocupado : SaidaParcial [presentes != 0] / registrarSaida()
+    Ocupado --> Vazio : OccupancyEvent_VAZIO [presentes == 0] / encerrarSessao(), desligarBancadas()
+
+    Vazio --> PreCondicionado : AulaProxima [aulaAgendada && dentroDaJanelaDeAntecipacao] / acionarClimatizacao()
+    PreCondicionado --> Vazio : AulaNaoConcretizada [prazoAposInicioExpirado && presentes == 0] / desligarClimatizacao()
+
+    Vazio --> Desativado : AmbienteDescomissionado [semSessaoAtiva] / desligarTodosOsDispositivos()
+    PreCondicionado --> Desativado : AmbienteDescomissionado [semSessaoAtiva] / desligarTodosOsDispositivos()
+
+    state Desativado
+    Desativado : Ambiente fora de operação
+    Desativado --> [*]
